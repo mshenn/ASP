@@ -1,0 +1,9 @@
+3.1
+BSM model and Bachelier model
+BS_FVSC 不同的class写法  ImpVol  MC
+ImpVol
+
+3.8
+control variate   MCmethod.theory  MC_demo.ipynb
+SpreadBasketOption    pdf.theory   BS_MC.ipynb   paper  HW1
+SABR
