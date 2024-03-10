@@ -71,7 +71,9 @@ def basket_price_mc(
         '''
         PUT the simulation of the geometric brownian motion below
         '''
-        prices = np.zeros_like(znorm_m)
+        prices = forward[:,None] * np.exp(-0.5 * np.diag(cov_m) * texp 
+                                          + np.sqrt(texp) * chol_m @ znorm_m
+                                          )
     else:
         # bsm = False: normal model
         prices = forward[:,None] + np.sqrt(texp) * chol_m @ znorm_m
