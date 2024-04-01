@@ -8,6 +8,7 @@ Created on Tue Oct 10
 import numpy as np
 import pyfeng as pf
 import abc
+import random
 
 class ModelABC(abc.ABC):
     beta = 1   # fixed (not used)
@@ -77,19 +78,16 @@ class ModelABC(abc.ABC):
         assert texp == tobs[-1]
 
         Z = np.random.standard_normal((n_dt, self.n_path))
-        Z1 = np.random.standard_normal((n_dt, self.n_path))
-        W = Z * self.rho + Z1 * np.sqrt(1 - self.rho ** 2)
-
         Z_t = np.cumsum(Z * np.sqrt(dt), axis=0)
         sigma_t = np.exp(self.vov * (Z_t - self.vov/2 * tobs[:, None]))
-        sigma_t = np.insert(sigma_t, 0, np.ones(sigma_t.shape[1]), axis=0) * self.sigma
-        # sigma_t = sigma_t * self.sigma
+        sigma_t = np.insert(sigma_t, 0, np.ones(sigma_t.shape[1]), axis=0)
 
-        return sigma_t, W
+        return sigma_t
+    
 
     def intvar_normalized(self, sigma_path):
         """
-        Normalized integraged variance I_t = \int_0^T sigma_t^2 dt / (sigma_0^2 T)
+        Normalized integraged variance I_t = \int_0^T sigma_t dt / (sigma_0^2 T)
 
         Args:
             sigma_path: sigma path
@@ -97,13 +95,13 @@ class ModelABC(abc.ABC):
         Returns:
 
         """
-        
+
         weight = np.ones(sigma_path.shape[0])
         weight[[0, -1]] = 0.5
         weight /= weight.sum()
         intvar = np.sum(weight[:, None] * sigma_path ** 2, axis=0)
-        intvar /= self.sigma ** 2
         return intvar
+
 
 class ModelBsmMC(ModelABC):
     """
@@ -127,21 +125,31 @@ class ModelBsmMC(ModelABC):
         (3) Calculate option prices (vector) for all strikes
         '''
 
-        sigmapath, W = self.sigma_path(texp)
-        sigmapath = sigmapath[:-1, :]   
-        # W = np.insert(W, 0, 1.5, axis=0)
-        # np.ones(W.shape[1]) * 0.5 * np.sqrt(self.dt) * self.sigma
+        # (1) Generate the paths of sigma_t. 
+        n_dt = int(np.ceil(texp / self.dt))
+        tobs = np.arange(1, n_dt + 1) / n_dt * texp
+        W, Z = np.random.standard_normal((n_dt, self.n_path)), np.random.standard_normal((n_dt, self.n_path))
+        W = self.rho * Z + np.sqrt(1-self.rho**2) * W
 
-        a1 = np.sqrt(self.dt) * np.cumsum(W * sigmapath, axis=0)
-        a2 = -0.5 * self.dt * np.cumsum(sigmapath ** 2, axis=0)
-        S_path = np.exp(a1 + a2) * spot
+        Z_t = np.cumsum(Z * np.sqrt(self.dt), axis=0)
+        sigma_t = np.exp(self.vov * (Z_t - self.vov/2 * tobs[:, None]))
+        sigma_t = self.sigma * np.insert(sigma_t, 0, np.ones(sigma_t.shape[1]), axis=0)
 
-        S_T = S_path[-1, :]
+        # (2) Simulate S_0, ...., S_T.
+        S_T = spot * np.ones(self.n_path)
+        for k in range(self.n_path):
+            log_temp = np.log(S_T[k])
+            for t in range(n_dt):
+                log_temp += sigma_t[t, k] * W[t, k] * np.sqrt(self.dt) - 0.5 * sigma_t[t, k]**2 * self.dt
+            S_T[k] = np.exp(log_temp)
+
+        # (3) Calculate option prices (vector) for all strikes
         df = np.exp(-self.intr * texp)
         p = df * np.mean(np.fmax(cp*(S_T - strike[:, None]), 0.0), axis=1)
         return p
 
-class ModelNormMC(ModelBsmMC):
+
+class ModelNormalMC(ModelBsmMC):
     """
     MC for Normal SABR (beta = 0)
     """
@@ -163,17 +171,28 @@ class ModelNormMC(ModelBsmMC):
         (3) Calculate option prices (vector) for all strikes
         '''
 
-        sigmapath, W = self.sigma_path(texp)
-        sigmapath = sigmapath[:-1, :]   
-        # W = np.insert(W, 0, 0, axis=0)
+        # (1) Generate the paths of sigma_t. 
+        n_dt = int(np.ceil(texp / self.dt))
+        tobs = np.arange(1, n_dt + 1) / n_dt * texp
+        W, Z = np.random.standard_normal((n_dt, self.n_path)), np.random.standard_normal((n_dt, self.n_path))
+        W = self.rho * Z + np.sqrt(1-self.rho**2) * W
 
-        a = np.sqrt(self.dt) * np.cumsum(W * sigmapath, axis=0)
-        S_path = spot + a
+        Z_t = np.cumsum(Z * np.sqrt(self.dt), axis=0)
+        sigma_t = np.exp(self.vov * (Z_t - self.vov/2 * tobs[:, None]))
+        sigma_t = self.sigma * np.insert(sigma_t, 0, np.ones(sigma_t.shape[1]), axis=0)
 
-        S_T = S_path[-1, :]
+
+        # (2) Simulate S_0, ...., S_T.
+        S_T = spot * np.ones(self.n_path)
+        for k in range(self.n_path):
+            for t in range(n_dt):
+                S_T[k] += sigma_t[t, k] * W[t, k] * np.sqrt(self.dt)
+
+        # (3) Calculate option prices (vector) for all strikes
         df = np.exp(-self.intr * texp)
         p = df * np.mean(np.fmax(cp*(S_T - strike[:, None]), 0.0), axis=1)
         return p
+
 
 class ModelBsmCondMC(ModelBsmMC):
     """
@@ -200,22 +219,27 @@ class ModelBsmCondMC(ModelBsmMC):
         p = np.mean(m.price(strike[:, None], spot_equiv, texp, cp), axis=1)
         '''
 
-        vol_path, _ = self.sigma_path(texp)
-        sigma_T = vol_path[-1, :]
-        I_T = self.intvar_normalized(vol_path)
+        # (1) Generate the paths of sigma_t and normalized integrated variance
+        vol_path = self.sigma_path(texp)  # the path of sigma_t
+        sigma_t = self.sigma * vol_path[-1, :]  # sigma_t at maturity (t=T)
+        I_t = self.intvar_normalized(vol_path)
 
-        vol = self.sigma * np.sqrt((1 - self.rho ** 2) * I_T)  
-        spot_equiv = spot * np.exp((sigma_T - self.sigma) * self.rho / self.vov - 0.5 * self.sigma ** 2 * texp * I_T * self.rho ** 2)
-
+        # (2) Calculate the equivalent spot and volatility of the BS model
+        vol = self.sigma * np.sqrt((1 - self.rho**2) * I_t)
+        spot_equiv = spot * np.exp(self.rho / self.vov * (sigma_t - self.sigma) -
+                                   self.rho**2 * self.sigma**2 * texp/2 * I_t)
+        
+        # (3) Calculate option prices (vector) by averaging the BS prices
         m = self.base_model(vol)
         p = np.mean(m.price(strike[:, None], spot_equiv, texp, cp), axis=1)
         
         return p
 
 
-class ModelNormCondMC(ModelNormMC):
+
+class ModelNormalCondMC(ModelNormalMC):
     """
-    Conditional MC for Norm SABR (beta = 0)
+    Conditional MC for Normal SABR (beta = 0)
     """
 
     def price(self, strike, spot, texp=1.0, cp=1):
@@ -238,13 +262,17 @@ class ModelNormCondMC(ModelNormMC):
         p = np.mean(m.price(strike[:, None], spot_equiv, texp, cp), axis=1)
         '''
 
-        vol_path, _ = self.sigma_path(texp)
-        sigma_T = vol_path[-1, :]
-        I_T = self.intvar_normalized(vol_path)
+        # (1) Generate the paths of sigma_t and normalized integrated variance
+        vol_path = self.sigma_path(texp)  # the path of sigma_t
+        sigma_t = vol_path[-1, :]  # sigma_t at maturity (t=T)
+        sigma_0 = vol_path[0, :]
+        I_t = self.intvar_normalized(vol_path) 
 
-        vol = self.sigma * np.sqrt((1 - self.rho ** 2) * I_T)  
-        spot_equiv = spot + (sigma_T - self.sigma) * self.rho / self.vov
+        # (2) Calculate the equivalent spot and volatility of the BS model
+        vol = self.sigma * np.sqrt((1 - self.rho**2) * I_t) 
+        spot_equiv = spot + self.rho / self.vov * (sigma_t - sigma_0)
 
+        # (3) Calculate option prices (vector) by averaging the Bachelier prices
         m = self.base_model(vol)
         p = np.mean(m.price(strike[:, None], spot_equiv, texp, cp), axis=1)
         
